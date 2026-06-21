@@ -2,6 +2,9 @@
 #include <future>
 #include <unordered_set>
 #include <stacktrace>
+#include <algorithm>
+#include <cwctype>
+#include <string>
 #include <wrl/client.h>
 
 #include <spdlog/spdlog.h>
@@ -30,6 +33,33 @@ static bool is_wine() {
         cached = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
     }
     return cached == 1;
+}
+
+static bool is_mhrise_executable() {
+    static int cached = -1;
+
+    if (cached == -1) {
+        wchar_t module_path[MAX_PATH]{};
+        const auto length = GetModuleFileNameW(nullptr, module_path, MAX_PATH);
+
+        if (length == 0) {
+            cached = 0;
+        } else {
+            std::wstring path{module_path, length};
+            std::ranges::transform(path, path.begin(), [](wchar_t c) {
+                return static_cast<wchar_t>(std::towlower(c));
+            });
+
+            cached = path.find(L"monsterhunterrise.exe") != std::wstring::npos ||
+                path.find(L"mhrisesunbreakdemo.exe") != std::wstring::npos;
+        }
+    }
+
+    return cached == 1;
+}
+
+static bool is_mhrise_wine() {
+    return is_mhrise_executable() && is_wine();
 }
 
 struct HeldRefcountProbe {
@@ -720,6 +750,13 @@ bool D3D12Hook::hook() {
 
     //suspender.resume();
 
+    if (m_hooked && wine && is_mhrise_executable()) {
+        command_queue_refcount_probe.valid = false;
+        command_queue_refcount_probe.object = nullptr;
+        spdlog::warn("[D3D12Hook] MHR/Wine minimal mode: keeping dummy D3D12 objects alive to avoid D3DMetal release deadlock");
+        return m_hooked;
+    }
+
     command_queue->Release();
     swap_chain1->Release();
     swap_chain->Release();
@@ -749,13 +786,18 @@ void D3D12Hook::hook_impl() {
 
     auto& present_fn = s_swapchain_vtable[8]; // Present
     m_present_hook = std::make_unique<PointerHook>(&present_fn, &D3D12Hook::present);
+    spdlog::info("Initialized Present hook");
 
-    if (s_create_swapchain_hook == nullptr) {
+    if (is_mhrise_wine()) {
+        spdlog::warn("[D3D12Hook] MHR/Wine minimal mode: skipping CreateSwapChainForHwnd hook");
+    } else if (s_create_swapchain_hook == nullptr) {
         auto& create_swapchain_fn = s_factory_vtable[15]; // CreateSwapChainForHwnd
         s_create_swapchain_hook = std::make_unique<PointerHook>(&create_swapchain_fn, &D3D12Hook::create_swapchain);
+        spdlog::info("Initialized CreateSwapChainForHwnd hook");
     }
 
     m_hooked = true;
+    spdlog::info("Finished initializing hooks");
 }
 
 bool D3D12Hook::unhook() {
