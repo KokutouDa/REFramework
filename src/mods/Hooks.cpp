@@ -44,6 +44,11 @@ std::optional<std::string> Hooks::on_initialize() {
         return "Unable to get module size";
     }
 
+    if (sdk::GameIdentity::get().is_mhrise() && is_wine()) {
+        spdlog::warn("[Hooks]: Skipping Hooks::on_initialize hook list on MHR/Wine for startup compatibility");
+        return Mod::on_initialize();
+    }
+
     for (auto hook : m_hook_list) {
         spdlog::info("[Hooks] Entering hook...");
 
