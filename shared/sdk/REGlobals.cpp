@@ -14,11 +14,20 @@
 
 #include <Windows.h>
 
-// Wine/CrossOver: hard access violations are NOT converted to C++ exceptions
-// (REFramework is not built with /EHa), so catch(...) misses them and a faulting
-// TDB walk kills the process before ScriptRunner runs. seh_guard lets the
+// Wine/CrossOver: some hard access violations in this startup path can still
+// bypass the normal C++ catch(...) flow and kill the process. seh_guard lets the
 // offending scan be abandoned instead of crashing the whole process.
 namespace {
+static bool is_wine() {
+    static int cached = -1;
+    if (cached == -1) {
+        auto ntdll = GetModuleHandleA("ntdll.dll");
+        cached = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
+    }
+
+    return cached == 1;
+}
+
 template <typename F>
 static bool seh_guard(F&& f) {
     __try {
@@ -50,6 +59,8 @@ REGlobals::REGlobals() {
 
     spdlog::info("start: {:x}", start);
     spdlog::info("end: {:x}", end);
+
+    const auto mhr_wine_minimal_mode = sdk::GameIdentity::get().is_mhrise() && is_wine();
 
     // generic pattern used for all these globals
     auto pat = std::string{ "48 8D ? ? ? ? ? 48 B8 00 00 00 00 00 00 00 80" };
@@ -84,11 +95,13 @@ REGlobals::REGlobals() {
         
     }
 
-    // Create a list of getter functions instead.
-    // In universal builds, TDB_VER=84 >= 78 is always true at compile time,
-    // so this scan always ran for every game (including DMC5 TDB 67).
-    // The scan is additive — it populates named getters alongside raw pointers.
-    {
+    if (mhr_wine_minimal_mode) {
+        spdlog::warn("[REGlobals] MHR/Wine minimal mode: skipping singleton getter discovery for startup compatibility");
+    } else {
+        // Create a list of getter functions instead.
+        // In universal builds, TDB_VER=84 >= 78 is always true at compile time,
+        // so this scan always ran for every game (including DMC5 TDB 67).
+        // The scan is additive — it populates named getters alongside raw pointers.
         spdlog::info("Usual pattern for REGlobals not working, falling back to scanning for SingletonBehavior types");
 
         auto& types = reframework::get_types();
@@ -136,59 +149,61 @@ REGlobals::REGlobals() {
         }
     }
 
-    // Also scan through TDB types for SingletonBehavior inheritance
-    // Wine/CrossOver: wrap the whole TDB walk in SEH (see seh_guard at top of file).
-    seh_guard([&]() {
-        auto tdb = sdk::RETypeDB::get();
+    if (!mhr_wine_minimal_mode) {
+        // Also scan through TDB types for SingletonBehavior inheritance
+        // Wine/CrossOver: wrap the whole TDB walk in SEH (see seh_guard at top of file).
+        seh_guard([&]() {
+            auto tdb = sdk::RETypeDB::get();
 
-        for (size_t i = 0; i < tdb->get_num_types(); ++i) try {
-            auto type_definition = tdb->get_type(i);
+            for (size_t i = 0; i < tdb->get_num_types(); ++i) try {
+                auto type_definition = tdb->get_type(i);
 
-            if (type_definition == nullptr || type_definition->get_name() == nullptr) {
+                if (type_definition == nullptr || type_definition->get_name() == nullptr) {
+                    continue;
+                }
+
+                auto high_name = std::string_view{ type_definition->get_name() };
+
+                for (auto super = type_definition; super != nullptr; super = super->get_parent_type()) {
+                    auto name = std::string_view{ super->get_name() };
+
+                    if (name.find("SingletonBehavior`1") != std::string::npos ||
+                        name.find("SingletonBehaviorRoot`1") != std::string::npos ||
+                        name.find("SnowSingletonBehaviorRoot`1") != std::string::npos ||
+                        name.find("RopewaySingletonBehaviorRoot`1") != std::string::npos ||
+                        name.find("GAElement`1") != std::string::npos ||
+                        name.find("AppSingleton`1") != std::string::npos)
+                    {
+                        if (high_name == name) {
+                            continue; // dont care.
+                        }
+
+                        auto full_name = super->get_full_name();
+
+                        spdlog::info("Found singleton type: {}", high_name.data());
+
+                        using Getter = REManagedObject* (*)();
+                        auto getter = (Getter)sdk::find_native_method(type_definition, "get_Instance");
+
+                        if (getter == nullptr) {
+                            spdlog::warn("Failed to find get_Instance method for {}", high_name.data());
+                            continue;
+                        }
+
+                        // Get the contained type by grabbing the string between the "`1<"" and the ">""
+                        auto type_name = std::string{full_name}.substr(full_name.find("`1<") + 3, full_name.find(">") - full_name.find("`1<") - 3);
+
+                        spdlog::info("{}", type_name);
+
+                        m_getters[type_name] = getter;
+                        break;
+                    }
+                }
+            } catch(...) {
                 continue;
             }
-            
-            auto high_name = std::string_view{ type_definition->get_name() };
-            
-            for (auto super = type_definition; super != nullptr; super = super->get_parent_type()) {
-                auto name = std::string_view{ super->get_name() };
-
-                if (name.find("SingletonBehavior`1") != std::string::npos ||
-                    name.find("SingletonBehaviorRoot`1") != std::string::npos ||
-                    name.find("SnowSingletonBehaviorRoot`1") != std::string::npos ||
-                    name.find("RopewaySingletonBehaviorRoot`1") != std::string::npos ||
-                    name.find("GAElement`1") != std::string::npos ||
-                    name.find("AppSingleton`1") != std::string::npos)
-                {
-                    if (high_name == name) {
-                        continue; // dont care.
-                    }
-
-                    auto full_name = super->get_full_name();
-
-                    spdlog::info("Found singleton type: {}", high_name.data());
-
-                    using Getter = REManagedObject* (*)();
-                    auto getter = (Getter)sdk::find_native_method(type_definition, "get_Instance");
-
-                    if (getter == nullptr) {
-                        spdlog::warn("Failed to find get_Instance method for {}", high_name.data());
-                        continue;
-                    }
-
-                    // Get the contained type by grabbing the string between the "`1<"" and the ">""
-                    auto type_name = std::string{full_name}.substr(full_name.find("`1<") + 3, full_name.find(">") - full_name.find("`1<") - 3);
-
-                    spdlog::info("{}", type_name);
-
-                    m_getters[type_name] = getter;
-                    break;
-                }
-            }
-        } catch(...) {
-            continue;
-        }
-    });
+        });
+    }
 
     spdlog::info("Found {} REGlobals", m_object_list.size());
     spdlog::info("Found {} getters", m_getters.size());
