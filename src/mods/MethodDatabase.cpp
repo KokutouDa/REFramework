@@ -1,12 +1,24 @@
 #include <chrono>
 #include <spdlog/spdlog.h>
 
+#include <sdk/GameIdentity.hpp>
 #include <sdk/RETypeDB.hpp>
 
 #include "utility/Exceptions.hpp"
 #include "utility/Scan.hpp"
 
 #include "MethodDatabase.hpp"
+
+static bool is_wine() {
+    static int cached = -1;
+
+    if (cached == -1) {
+        const auto ntdll = GetModuleHandleA("ntdll.dll");
+        cached = (ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
+    }
+
+    return cached == 1;
+}
 
 std::shared_ptr<MethodDatabase>& MethodDatabase::get() {
     static auto instance = std::make_shared<MethodDatabase>();
@@ -18,6 +30,11 @@ std::string MethodDatabase::resolve_address(uintptr_t addr) {
 }
 
 std::optional<std::string> MethodDatabase::on_initialize() {
+    if (sdk::GameIdentity::get().is_mhrise() && is_wine()) {
+        spdlog::warn("[MethodDatabase] Skipping method address map on MHR/Wine for startup compatibility");
+        return Mod::on_initialize();
+    }
+
     spdlog::info("[MethodDatabase] Building method address map...");
 
     const auto start = std::chrono::steady_clock::now();
