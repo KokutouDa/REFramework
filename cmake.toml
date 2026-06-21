@@ -10,8 +10,11 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MP")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
 
-# Disable exceptions
-# string(REGEX REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+# Use asynchronous exception handling so Wine SEH scan faults can be caught by C++ catch(...)
+string(REGEX REPLACE "(^| )/EH[a-zA-Z]*" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REGEX REPLACE "(^| )/EH[a-zA-Z]*" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHa")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /EHa")
 
 set(ASMJIT_STATIC ON CACHE BOOL "" FORCE)
 set(DYNAMIC_LOADER ON CACHE BOOL "" FORCE) # OpenXR
@@ -48,7 +51,7 @@ endif()
 """
 
 [options]
-DEVELOPER_MODE = { value = true }
+DEVELOPER_MODE = { value = false }
 REF_BUILD_FRAMEWORK = { value = true }
 REF_BUILD_DEPENDENCIES = { value = true }
 

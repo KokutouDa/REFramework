@@ -48,12 +48,18 @@ std::shared_ptr<IntegrityCheckBypass>& IntegrityCheckBypass::get_shared_instance
 }
 
 std::optional<std::string> IntegrityCheckBypass::on_initialize() {
+    const auto& gi = sdk::GameIdentity::get();
+
+    if (gi.is_mhrise() && is_wine()) {
+        spdlog::warn("[IntegrityCheckBypass]: Skipping MHR on_initialize patches on Wine/CrossOver for startup compatibility");
+        return Mod::on_initialize();
+    }
+
     // Patterns for assigning or accessing of the integrity check boolean (RE3)
     // and for jumping past the integrity checks (RE8)
     // In RE8, the integrity checks cause a noticeable stutter as well.
     std::vector<IntegrityCheckPattern> possible_patterns{};
 
-    const auto& gi = sdk::GameIdentity::get();
     if (gi.is_re3()) {
         possible_patterns = {
             /*
