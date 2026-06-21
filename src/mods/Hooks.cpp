@@ -13,6 +13,19 @@
 
 Hooks* g_hook = nullptr;
 
+static bool is_wine() {
+    static int cached = -1;
+    if (cached == -1) {
+        auto ntdll = GetModuleHandleA("ntdll.dll");
+        cached = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
+        if (cached) {
+            spdlog::info("[Hooks]: Wine/CrossOver/Proton environment detected");
+        }
+    }
+
+    return cached == 1;
+}
+
 std::shared_ptr<Hooks>& Hooks::get() {
     static std::shared_ptr<Hooks> instance = std::make_shared<Hooks>();
     return instance;
@@ -750,6 +763,27 @@ std::optional<std::string> Hooks::hook_render_layer(Hooks::RenderLayerHook<sdk::
         }
     } else {
         spdlog::info("Skipping update hook for {:s}, stub code detected", hook.name);
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> Hooks::hook_render_layers() {
+    if (sdk::GameIdentity::get().is_mhrise() && is_wine()) {
+        spdlog::warn("[Hooks]: Skipping render layer hooks on MHR/Wine for startup compatibility");
+        return std::nullopt;
+    }
+
+    if (auto error = hook_render_layer(m_layer_hooks.overlay); error.has_value()) {
+        return error;
+    }
+
+    if (auto error = hook_render_layer(m_layer_hooks.post_effect); error.has_value()) {
+        return error;
+    }
+
+    if (auto error = hook_render_layer(m_layer_hooks.scene); error.has_value()) {
+        return error;
     }
 
     return std::nullopt;

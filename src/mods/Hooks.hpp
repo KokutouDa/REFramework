@@ -115,21 +115,7 @@ private:
     std::optional<std::string> hook_camera_get_view_matrix();
     
     std::optional<std::string> hook_render_layer(RenderLayerHook<sdk::renderer::RenderLayer>& hook);
-    std::optional<std::string> hook_render_layers() {
-        if (auto error = hook_render_layer(m_layer_hooks.overlay); error.has_value()) {
-            return error;
-        }
-
-        if (auto error = hook_render_layer(m_layer_hooks.post_effect); error.has_value()) {
-            return error;
-        }
-
-        if (auto error = hook_render_layer(m_layer_hooks.scene); error.has_value()) {
-            return error;
-        }
-
-        return std::nullopt;
-    }
+    std::optional<std::string> hook_render_layers();
 
     // Utility function for hooking function entries in via.Application
     std::optional<std::string> hook_application_entry(std::string name, std::unique_ptr<FunctionHook>& hook, void (*hook_fn)(void*));
