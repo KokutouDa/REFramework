@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <spdlog/spdlog.h>
 #include <hde64.h>
+#include <Windows.h>
 
 #include "utility/Scan.hpp"
 #include "utility/Module.hpp"
@@ -8,6 +9,18 @@
 #include "RETypeDB.hpp"
 #include "ResourceManager.hpp"
 #include "GameIdentity.hpp"
+
+namespace {
+template <typename F>
+static bool seh_guard(F&& f) {
+    __try {
+        f();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+} // namespace
 
 namespace sdk {
 // static definitions
@@ -36,6 +49,11 @@ void Resource::add_ref() {
 
 void Resource::release() {
     ResourceManager::update_pointers();
+
+    if (s_release_fn == nullptr) {
+        spdlog::warn("[Resource::release] Function pointer unavailable; skipping release");
+        return;
+    }
 
     s_release_fn(this);
 }
@@ -76,6 +94,11 @@ ResourceManager* ResourceManager::get() {
 sdk::Resource* ResourceManager::create_resource(void* type_info, std::wstring_view name) {
     update_pointers();
 
+    if (s_create_resource_fn == nullptr) {
+        spdlog::error("[ResourceManager::create_resource] Function pointer unavailable");
+        return nullptr;
+    }
+
     return s_create_resource_fn(this, type_info, name.data());
 }
 
@@ -83,6 +106,11 @@ sdk::Resource* ResourceManager::create_resource(void* type_info, std::wstring_vi
 // createResource that are called in create_userdata
 intrusive_ptr<sdk::ManagedObject> ResourceManager::create_userdata(void* type_info, std::wstring_view name) {
     update_pointers();
+
+    if (s_create_userdata_fn == nullptr) {
+        spdlog::warn("[ResourceManager::create_userdata] Function pointer unavailable");
+        return {};
+    }
 
     intrusive_ptr<sdk::ManagedObject> out{};
     s_create_userdata_fn(this, &out, type_info, name.data());
@@ -147,7 +175,7 @@ void ResourceManager::update_pointers() {
             
             // now find create_userdata, using the previous function as a reference to ignore
             // since they both have the same pattern at the start of the function
-            {
+            const auto create_userdata_scan_ok = seh_guard([&]() {
                 const auto tdb_ver = sdk::GameIdentity::get().tdb_ver();
                 bool found = false;
                 if (tdb_ver < 81) {
@@ -247,6 +275,10 @@ void ResourceManager::update_pointers() {
                 } else {
                     spdlog::error("[ResourceManager::create_userdata] Failed to find function!");
                 }
+            });
+
+            if (!create_userdata_scan_ok) {
+                spdlog::warn("[ResourceManager::create_userdata] SEH exception while scanning; create_userdata API disabled for this run");
             }
         } else {
             spdlog::error("[ResourceManager::create_resource] Failed to find function!");
@@ -315,19 +347,45 @@ void Resource::update_pointers() {
 
     constexpr size_t CALL_INSN_SIZE = 5;
 
-    auto first_call = locate_add_ref_or_release(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE); // first pass finds add_ref or release
-    locate_add_ref_or_release(*first_call + CALL_INSN_SIZE); // second pass finds add_ref or release
+    std::optional<uintptr_t> first_call{};
+    const auto first_call_ok = seh_guard([&]() {
+        first_call = locate_add_ref_or_release(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE); // first pass finds add_ref or release
+    });
+
+    if (!first_call_ok) {
+        spdlog::warn("[Resource::update_pointers] SEH exception while locating first add_ref/release call");
+        return;
+    }
+
+    if (!first_call) {
+        spdlog::warn("[Resource::update_pointers] Could not locate first add_ref/release call");
+        return;
+    }
+
+    const auto second_call_ok = seh_guard([&]() {
+        locate_add_ref_or_release(*first_call + CALL_INSN_SIZE); // second pass finds add_ref or release
+    });
+
+    if (!second_call_ok) {
+        spdlog::warn("[Resource::update_pointers] SEH exception while locating second add_ref/release call");
+    }
 
     if (s_add_ref_fn == nullptr) {
-        const auto first_lock_inc = utility::find_pattern_in_path((uint8_t*)(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE), 15, false, "F0 FF");
+        const auto refcount_scan_ok = seh_guard([&]() {
+            const auto first_lock_inc = utility::find_pattern_in_path((uint8_t*)(ResourceManager::s_create_resource_reference + CALL_INSN_SIZE), 15, false, "F0 FF");
 
-        if (first_lock_inc.has_value()) {
-            const auto& ix = first_lock_inc->instrux;
+            if (first_lock_inc.has_value()) {
+                const auto& ix = first_lock_inc->instrux;
 
-            if (ix.HasLock && ix.Instruction == ND_INS_INC && ix.Operands[0].Type == ND_OP_MEM && ix.Operands[0].Info.Memory.HasBase && ix.Operands[0].Info.Memory.HasDisp) {
-                s_refcount_offset = ix.Operands[0].Info.Memory.Disp;
-                spdlog::info("[Resource::update_pointers] Found refcount offset at {:x}", *s_refcount_offset);
+                if (ix.HasLock && ix.Instruction == ND_INS_INC && ix.Operands[0].Type == ND_OP_MEM && ix.Operands[0].Info.Memory.HasBase && ix.Operands[0].Info.Memory.HasDisp) {
+                    s_refcount_offset = ix.Operands[0].Info.Memory.Disp;
+                    spdlog::info("[Resource::update_pointers] Found refcount offset at {:x}", *s_refcount_offset);
+                }
             }
+        });
+
+        if (!refcount_scan_ok) {
+            spdlog::warn("[Resource::update_pointers] SEH exception while scanning refcount fallback");
         }
     }
 }
