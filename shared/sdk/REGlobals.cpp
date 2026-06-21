@@ -12,6 +12,24 @@
 
 #include "REGlobals.hpp"
 
+#include <Windows.h>
+
+// Wine/CrossOver: hard access violations are NOT converted to C++ exceptions
+// (REFramework is not built with /EHa), so catch(...) misses them and a faulting
+// TDB walk kills the process before ScriptRunner runs. seh_guard lets the
+// offending scan be abandoned instead of crashing the whole process.
+namespace {
+template <typename F>
+static bool seh_guard(F&& f) {
+    __try {
+        f();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+} // namespace
+
 namespace reframework {
 std::unique_ptr<REGlobals>& get_globals() {
     static auto globals = std::make_unique<REGlobals>();
@@ -119,7 +137,8 @@ REGlobals::REGlobals() {
     }
 
     // Also scan through TDB types for SingletonBehavior inheritance
-    {
+    // Wine/CrossOver: wrap the whole TDB walk in SEH (see seh_guard at top of file).
+    seh_guard([&]() {
         auto tdb = sdk::RETypeDB::get();
 
         for (size_t i = 0; i < tdb->get_num_types(); ++i) try {
@@ -169,7 +188,7 @@ REGlobals::REGlobals() {
         } catch(...) {
             continue;
         }
-    }
+    });
 
     spdlog::info("Found {} REGlobals", m_object_list.size());
     spdlog::info("Found {} getters", m_getters.size());
